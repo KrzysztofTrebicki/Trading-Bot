@@ -1,77 +1,70 @@
-from binance.client import Client
+from datetime import datetime
 import os
 import json
+
+from binance.client import Client
+
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+from tqdm import tqdm
 
+client = Client()
 
-# Variable for the location of settings.json
-import_filepath = "settings.json"
+symbol = "BTCUSDT"
+start_str = "2017-08-17 04:00:00"
+end_str = "2023-04-17 00:00:00"
+output_filename = f"data/{symbol}_{start_str}_{end_str}.parquet"
 
+# calculate mins for tqdm progress bar
+fmt = "%Y-%m-%d %H:%M:%S"
+td = datetime.strptime(end_str, fmt) - datetime.strptime(start_str, fmt)
+td_mins = int(round(td.total_seconds() / 60))
 
-# Import API keys 
-def get_project_settings(importFilepath):
-    # Test the filepath to sure it exists
-    if os.path.exists(importFilepath):
-        # Open the file
-        f = open(importFilepath, "r")
-        # Get the information from file
-        project_settings = json.load(f)
-        # Close the file
-        f.close()
-        # Return project settings to program
-        return project_settings
-    else:
-        return ImportError
-    
-   
-   
-# Project settings import 
-project_settings = get_project_settings(import_filepath)
-# Declare the keys
-api_key = project_settings['BinanceKeys']['API_Key']
-secret_key = project_settings['BinanceKeys']['Secret_Key']
-# Pass API keys 
-client = Client(api_key, secret_key)
+# Instantiate data generator
+data_generator = client.get_historical_klines_generator(
+    symbol=symbol,
+    interval=Client.KLINE_INTERVAL_1MINUTE,
+    start_str=start_str,
+    end_str=end_str
+)
 
-
-#Instantiate data generator
-data_generator = client.get_historical_klines_generator("BTCBUSD", Client.KLINE_INTERVAL_1MINUTE, "1 Jan 2021", "27 Mar 2023") # range needed to obtain values for SMA calculation
-# List the output of generator
-raw_data = list(data_generator)
-# Empty list for 
-converted_data = []
-# Populate converted_list with cobverted data (in a form of dictionary)
-for candle in raw_data:
-    # Dictionary object
-    converted_candle = {
-            'time': candle[0],
-            'open': float(candle[1]),
-            'high': float(candle[2]),
-            'low': float(candle[3]),
-            'close': float(candle[4]),
-            'volume': float(candle[5]),
-            'close_time': candle[6],
-            'quote_asset_volume': float(candle[7]),
-            'number_of_trades': int(candle[8]),
-            'taker_buy_base_asset_volume': float(candle[9]),
-            'taker_buy_quote_asset_volume': float(candle[10])
+def parse_raw_candle(c):
+    return {
+        "time": c[0],
+        "open": float(c[1]),
+        "high": float(c[2]),
+        "low": float(c[3]),
+        "close": float(c[4]),
+        "volume": float(c[5]),
+        "close_time": c[6],
+        "quote_asset_volume": float(c[7]),
+        "number_of_trades": int(c[8]),
+        "taker_buy_base_asset_volume": float(c[9]),
+        "taker_buy_quote_asset_volume": float(c[10]),
     }
-    # Add to converted_data
-    converted_data.append(converted_candle)
-    
-    
-# Transform rconverted_data into a Pandas DataFrame
-df_data = pd.DataFrame(converted_data)
-# Convert the time to human readable format (Binance uses micro-seconds)
-df_data['time'] = pd.to_datetime(df_data['time'], unit='ms')
-# Convert the close time to human readable format (Binance uses micro-seconds)
-df_data['close_time'] = pd.to_datetime(df_data['close_time'], unit='ms') 
+
+success = False
+
+# Try to parse data until it works
+# TODO: This is a hacky way to do this, but it works for now
+while not success:
+    data = []
+    try:
+        for raw_candle in tqdm(data_generator, desc = "Downloading data from Binance API", total=td_mins): 
+            data.append(parse_raw_candle(raw_candle))
+        success = True
+    except TimeoutError as e:
+        print("TimeoutError")
+        print(e)
+        pass
+
+df = pd.DataFrame(data)
+df["time"] = pd.to_datetime(df["time"], unit="ms")
+df["close_time"] = pd.to_datetime(df["close_time"], unit="ms")
 
 
 # Convert DataFrame to Apache Arrow Table
-table = pa.Table.from_pandas(df_data)
+table = pa.Table.from_pandas(df)
 # Write data as parquet with Brotli compression (most space efficient type of compression)
-pq.write_table(table, 'BTC_data_1m_01012021.parquet')
-
+pq.write_table(table, output_filename)
